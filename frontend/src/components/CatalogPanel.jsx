@@ -20,6 +20,14 @@ const CATEGORIES = [
 
 const PAGE_SIZE = 4
 
+const SUPPORT_LINKS = [
+  { icon: '🛎', label: 'Visit our Support Center' },
+  { icon: '📦', label: 'Check your Order Status' },
+  { icon: '🚚', label: 'Shipping, Delivery & Store Pickup' },
+  { icon: '↩', label: 'Returns & Exchanges' },
+  { icon: '🏷', label: 'Price Match Guarantee' },
+]
+
 export default function CatalogPanel({
   catalogState, agentColor, onProductSelect,
   cart, onAddToCart, onUpdateCartQty, onRemoveFromCart, onClearCart, onApplyDiscount, onSetCartItem, user,
@@ -29,6 +37,7 @@ export default function CatalogPanel({
   const [promotion, setPromotion] = useState(null)
   const [compareProducts, setCompare] = useState([])
   const [activeSubcat, setActiveSubcat] = useState('All')
+  const [featuredDeals, setFeaturedDeals] = useState([])
 
   const color     = agentColor || '#0D5C6E'
   const cartCount = cart?.reduce((s, i) => s + i.quantity, 0) || 0
@@ -79,24 +88,122 @@ export default function CatalogPanel({
     }
   }, [catalogState])
 
+  // Fetch featured deals on mount — one top-discount product per category
+  useEffect(() => {
+    const cats = ['refrigerators', 'air_conditioners', 'microwaves']
+    Promise.all(cats.map(cat =>
+      fetch(`/api/products?category=${cat}`).then(r => r.json()).catch(() => [])
+    )).then(results => {
+      const deals = results.map(prods =>
+        [...prods].sort((a, b) => b.discount_pct - a.discount_pct)[0]
+      ).filter(Boolean)
+      setFeaturedDeals(deals)
+    })
+  }, [])
+
   // ── Cart button (shown when cart has items and not already in cart/checkout) ─
   const showCartBadge = cartCount > 0 && view.type !== 'cart' && view.type !== 'checkout'
 
   // ── Home ──────────────────────────────────────────────────────────────────
   const renderHome = () => (
     <div>
-      <div className="mb-5">
-        <h2 className="text-lg font-bold text-gray-800">CoolNest Catalogue</h2>
-        <p className="text-sm text-gray-500">Smart Appliances, Smarter Prices — tell our agent what you need!</p>
+      {/* Section 1 — Deals of the Day */}
+      <div className="mb-6">
+        <div className="flex items-center gap-3 mb-3">
+          <h2 className="text-lg font-bold text-gray-800">🔥 Deals of the Day</h2>
+          <span className="bg-red-500 text-white text-xs font-bold px-2.5 py-0.5 rounded-full">Today Only</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          {featuredDeals.length > 0
+            ? featuredDeals.map(product => (
+                <button
+                  key={product.sku}
+                  onClick={() => fetchAndShowCategory(product.category)}
+                  className="rounded-2xl border border-gray-200 bg-white p-3 flex flex-col text-left hover:shadow-lg hover:border-gray-300 transition-all duration-200 group"
+                >
+                  {/* Image */}
+                  <div className="w-full h-40 rounded-xl flex items-center justify-center mb-3 overflow-hidden relative"
+                       style={{ background: 'linear-gradient(135deg, #f3f4f6 0%, #e9ecef 100%)' }}>
+                    {product.image
+                      ? <img src={product.image} alt={product.name} className="w-full h-full object-contain p-3" />
+                      : <span className="text-5xl">{product.emoji || '📦'}</span>}
+                    {product.discount_pct > 0 && (
+                      <div className="absolute top-2 right-2 bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
+                        -{product.discount_pct}%
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Brand */}
+                  {product.brand && (
+                    <p className="text-xs font-bold uppercase tracking-widest mb-1 truncate"
+                       style={{ color: '#0D5C6E' }}>{product.brand}</p>
+                  )}
+
+                  {/* Name */}
+                  <p className="text-xs font-semibold text-gray-800 leading-snug line-clamp-2 mb-2 flex-1">
+                    {product.name}
+                  </p>
+
+                  {/* Price */}
+                  <div className="flex items-baseline gap-1.5 mb-2">
+                    <span className="text-sm font-bold text-gray-900">${product.price.toLocaleString()}</span>
+                    {product.price_original > product.price && (
+                      <span className="text-xs text-gray-400 line-through">${product.price_original.toLocaleString()}</span>
+                    )}
+                  </div>
+
+                  {/* CTA */}
+                  <div className="text-xs font-semibold group-hover:underline" style={{ color: '#0D5C6E' }}>
+                    Shop Now →
+                  </div>
+                </button>
+              ))
+            : /* Skeleton placeholders */
+              [0, 1, 2].map(i => (
+                <div key={i} className="rounded-2xl border border-gray-200 bg-white p-3 flex flex-col animate-pulse">
+                  <div className="w-full h-40 rounded-xl bg-gray-100 mb-3" />
+                  <div className="h-3 bg-gray-100 rounded mb-2 w-1/2" />
+                  <div className="h-3 bg-gray-100 rounded mb-1 w-full" />
+                  <div className="h-3 bg-gray-100 rounded mb-3 w-3/4" />
+                  <div className="h-4 bg-gray-100 rounded w-1/3" />
+                </div>
+              ))
+          }
+        </div>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        {CATEGORIES.map(cat => (
-          <button key={cat.id} onClick={() => fetchAndShowCategory(cat.id)}
-            className="rounded-2xl border-2 border-gray-100 hover:border-brand bg-white p-4 flex flex-col items-center gap-2 transition-all duration-200 hover:shadow-md">
-            <span className="text-3xl">{cat.icon}</span>
-            <span className="text-xs font-medium text-gray-600 text-center leading-tight">{cat.name}</span>
-          </button>
-        ))}
+
+      {/* Section 2 — Browse by Category */}
+      <div className="mb-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-3">Browse by Category</h2>
+        <div className="grid grid-cols-3 gap-3">
+          {CATEGORIES.map(cat => (
+            <button key={cat.id} onClick={() => fetchAndShowCategory(cat.id)}
+              className="rounded-2xl border-2 border-gray-100 hover:border-gray-300 bg-white p-4 flex flex-col items-center gap-2 transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 group">
+              <span className="text-3xl group-hover:scale-110 transition-transform duration-200">{cat.icon}</span>
+              <span className="text-xs font-medium text-gray-600 text-center leading-tight">{cat.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Section 3 — Footer support links */}
+      <div>
+        <div className="h-px bg-gray-200 mb-4" />
+        <div className="flex flex-wrap justify-center gap-x-4 gap-y-2">
+          {SUPPORT_LINKS.map((link, i) => (
+            <a
+              key={i}
+              href="#"
+              onClick={e => e.preventDefault()}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+            >
+              <span>{link.icon}</span>
+              <span>{link.label}</span>
+            </a>
+          ))}
+        </div>
       </div>
     </div>
   )
