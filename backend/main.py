@@ -88,6 +88,39 @@ async def get_product(sku: str):
     return product
 
 
+@app.post("/api/orders")
+async def create_order(body: dict):
+    import uuid, asyncio
+    from datetime import datetime
+    user_id = body.get("user_id", "").strip().lower()
+    token   = body.get("token", "")
+    user    = verify_token(user_id, token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    order_id = f"CN-{uuid.uuid4().hex[:8].upper()}"
+    items    = body.get("items", [])
+
+    # Log each line item to BigQuery (non-blocking, best effort)
+    try:
+        import bq_client as bq
+        for item in items:
+            asyncio.create_task(bq.log_message(
+                order_id, user_id, "order", "system",
+                f"ORDER: {item['quantity']}x {item['name']} @ ${item['price']}"
+            ))
+    except Exception:
+        pass
+
+    return {
+        "order_id":   order_id,
+        "status":     "confirmed",
+        "total":      body.get("total", 0),
+        "created_at": datetime.utcnow().isoformat(),
+        "delivery":   "3–5 business days",
+    }
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "CoolNest"}

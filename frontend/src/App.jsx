@@ -16,6 +16,7 @@ export default function App() {
   const [agentSpeaking, setAgentSpeaking] = useState(false)
   const [transitioning, setTransitioning] = useState(false)
   const [catalogState, setCatalogState]   = useState(null)
+  const [cart, setCart]                   = useState([])
   const [error, setError]                 = useState('')
   const [reconnecting, setReconnecting]   = useState(false)
 
@@ -178,6 +179,38 @@ export default function App() {
     addTranscript('user', null, text)
   }, [addTranscript])
 
+  // ── Cart management ───────────────────────────────────────────────────────
+  const handleAddToCart = useCallback((product, quantity = 1) => {
+    setCart(prev => {
+      const existing = prev.find(i => i.product.sku === product.sku)
+      if (existing) {
+        return prev.map(i => i.product.sku === product.sku
+          ? { ...i, quantity: i.quantity + quantity } : i)
+      }
+      return [...prev, { product, quantity }]
+    })
+  }, [])
+
+  const handleUpdateCartQty = useCallback((sku, delta) => {
+    setCart(prev =>
+      prev.map(i => i.product.sku === sku ? { ...i, quantity: Math.max(0, i.quantity + delta) } : i)
+          .filter(i => i.quantity > 0)
+    )
+  }, [])
+
+  const handleRemoveFromCart = useCallback((sku) => {
+    setCart(prev => prev.filter(i => i.product.sku !== sku))
+  }, [])
+
+  const handleClearCart = useCallback(() => setCart([]), [])
+
+  // ── Product selected by user in catalog ──────────────────────────────────
+  const handleProductSelect = useCallback((product) => {
+    sessionRef.current?.sendText(
+      `[The customer just opened the detail page for: ${product.name} (SKU: ${product.sku}, Price: $${product.price}). Please acknowledge this product and offer to describe its features or answer questions about it.]`
+    )
+  }, [])
+
   // ── Volume ────────────────────────────────────────────────────────────────
   const handleVolume = useCallback((v) => {
     setVolume(v)
@@ -265,7 +298,17 @@ export default function App() {
           />
         </div>
         <div className="flex-1 overflow-hidden">
-          <CatalogPanel catalogState={catalogState} agentColor={agent?.color} />
+          <CatalogPanel
+            catalogState={catalogState}
+            agentColor={agent?.color}
+            onProductSelect={handleProductSelect}
+            cart={cart}
+            user={user}
+            onAddToCart={handleAddToCart}
+            onUpdateCartQty={handleUpdateCartQty}
+            onRemoveFromCart={handleRemoveFromCart}
+            onClearCart={handleClearCart}
+          />
         </div>
       </div>
     </div>

@@ -23,19 +23,18 @@ from google.genai import types
 import bq_client as bq
 from agents import AGENTS, build_system_prompt, get_tools_for_agent, agent_public_info
 from auth import verify_token
-from config import PROJECT_ID, LIVE_LOCATION, LIVE_MODEL
+from config import PROJECT_ID, LIVE_LOCATION, LIVE_MODEL, GEMINI_API_KEY
 from products import PRODUCTS, get_category_products, search_products
 
 log = logging.getLogger("coolnest.ws")
 logging.basicConfig(level=logging.INFO)
 
-os.environ.setdefault("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
-os.environ.setdefault("GOOGLE_CLOUD_LOCATION", LIVE_LOCATION)
-os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
+# Vertex AI env vars only needed for BQ/other Vertex calls, not for Live API (uses API key)
 
 
 def _get_genai_client():
-    return genai.Client(vertexai=True, project=PROJECT_ID, location=LIVE_LOCATION)
+    # Gemini 3.1 Live is only available via AI Studio API key, not Vertex AI
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ── Tool execution ──────────────────────────────────────────────────────────
@@ -45,22 +44,28 @@ async def execute_tool(name: str, args: dict, ws: WebSocket, session_state: dict
 
     # ── Catalog display ────────────────────────────────────────────────────
     if name == "show_catalog_category":
-        category   = args.get("category", "")
+        category    = args.get("category", "")
         subcategory = args.get("subcategory")
-        page       = args.get("page", 1)
-        products   = get_category_products(category, subcategory)
+        page        = args.get("page", 1)
+        # Always send ALL products to the browser — subcategory only pre-selects the UI filter tab.
+        # This prevents "No products" when the agent passes a subcategory that no longer exists.
+        all_products = get_category_products(category)
         await _send(ws, {
             "type": "catalog_action", "action": "show_category",
             "category": category, "subcategory": subcategory,
-            "page": page, "products": products,
+            "page": page, "products": all_products,
         })
-        # Return product list so agent knows the SKUs and can call show_product_detail
+        # Return the (optionally filtered) list to the agent so it knows the SKUs
+        agent_view = get_category_products(category, subcategory) if subcategory else all_products
         product_list = [
             {"sku": p["sku"], "name": p["name"], "price": p["price"],
              "subcategory": p.get("subcategory", ""), "rating": p.get("rating")}
-            for p in products
+            for p in agent_view
         ]
-        return {"status": "ok", "products_shown": len(products), "products": product_list}
+        # Remember for reconnect context so agent keeps SKUs across session resets
+        session_state["last_shown_products"] = product_list
+        session_state["last_shown_category"] = category
+        return {"status": "ok", "products_shown": len(product_list), "products": product_list}
 
     if name == "highlight_product":
         sku = args.get("sku", "")
@@ -106,6 +111,27 @@ async def execute_tool(name: str, args: dict, ws: WebSocket, session_state: dict
             max_price=args.get("max_price"),
         )
         return {"results": results[:6], "count": len(results)}
+
+    # ── Cart ──────────────────────────────────────────────────────────────
+    if name == "add_to_cart":
+        sku      = args.get("sku", "")
+        quantity = int(args.get("quantity", 1))
+        product  = PRODUCTS.get(sku)
+        if not product:
+            return {"status": "error", "message": f"Product {sku} not found. Call show_catalog_category first to get valid SKUs."}
+        await _send(ws, {"type": "catalog_action", "action": "add_to_cart",
+                         "product": product, "quantity": quantity})
+        return {"status": "ok", "added": product["name"], "quantity": quantity,
+                "unit_price": product["price"],
+                "line_total": round(product["price"] * quantity, 2)}
+
+    if name == "show_cart":
+        await _send(ws, {"type": "catalog_action", "action": "show_cart"})
+        return {"status": "ok"}
+
+    if name == "proceed_to_checkout":
+        await _send(ws, {"type": "catalog_action", "action": "show_checkout"})
+        return {"status": "ok"}
 
     # ── Agent transfer ─────────────────────────────────────────────────────
     if name == "transfer_to_agent":
@@ -194,7 +220,7 @@ async def run_agent_session(
         output_audio_transcription=types.AudioTranscriptionConfig(),
     )
 
-    session_state = {"transfer": None, "browser_disconnected": False, "conversation_log": []}
+    session_state = {"transfer": None, "browser_disconnected": False, "conversation_log": [], "response_count": 0, "last_shown_products": [], "last_shown_category": ""}
     # done is set by whichever task exits first → signals the other to stop
     done = asyncio.Event()
 
@@ -225,43 +251,43 @@ async def run_agent_session(
 
                         if mtype == "audio":
                             audio_bytes = base64.b64decode(msg["data"])
-                            # IMPORTANT: end_of_turn is always False for audio.
-                            # The native audio model uses built-in VAD to detect
-                            # when the user stops speaking — sending True here
-                            # ends the Gemini session permanently.
-                            await gemini.send(
-                                input=types.Blob(
+                            # send_realtime_input: uses VAD, no end_of_turn needed
+                            await gemini.send_realtime_input(
+                                audio=types.Blob(
                                     data=audio_bytes,
                                     mime_type="audio/pcm;rate=16000",
-                                ),
-                                end_of_turn=False,
+                                )
                             )
 
                         elif mtype == "text":
-                            # Text input is a complete turn by nature
-                            await gemini.send(
-                                input=types.Content(
+                            await gemini.send_client_content(
+                                turns=types.Content(
                                     parts=[types.Part(text=msg.get("data", ""))],
                                     role="user",
                                 ),
-                                end_of_turn=True,
+                                turn_complete=True,
                             )
 
                 except Exception as e:
-                    log.debug(f"b2g ended: {e}")
+                    log.warning(f"b2g error [{agent_id}]: {type(e).__name__}: {e}")
                 finally:
                     done.set()
 
             # ── Gemini → browser ──────────────────────────────────────────
             async def gemini_to_browser():
+                response_count = 0
+                session_state["response_count"] = 0
                 try:
                     async for response in gemini.receive():
+                        response_count += 1
+                        session_state["response_count"] = response_count
                         if done.is_set():
+                            log.info(f"g2b [{agent_id}]: done set after {response_count} responses — stopping")
                             break
 
                         # ── GoAway: Gemini is about to close this session ─
                         if response.go_away:
-                            log.info(f"Gemini GoAway for [{agent_id}] — will auto-reconnect")
+                            log.info(f"Gemini GoAway [{agent_id}] after {response_count} responses — reconnecting")
                             await _send(ws, {"type": "reconnecting",
                                              "agent": agent_public_info(agent)})
                             break
@@ -289,11 +315,11 @@ async def run_agent_session(
                                         session_id, user["id"], "agent", agent_id, text
                                     ))
                                     # Track for reconnect context — merge consecutive agent chunks
-                                    log = session_state["conversation_log"]
-                                    if log and log[-1]["speaker"] == "agent":
-                                        log[-1]["text"] += " " + text
+                                    conv_log = session_state["conversation_log"]
+                                    if conv_log and conv_log[-1]["speaker"] == "agent":
+                                        conv_log[-1]["text"] += " " + text
                                     else:
-                                        log.append({"speaker": "agent", "text": text})
+                                        conv_log.append({"speaker": "agent", "text": text})
 
                             if sc.input_transcription and sc.input_transcription.text:
                                 text = sc.input_transcription.text.strip()
@@ -308,11 +334,11 @@ async def run_agent_session(
                                         session_id, user["id"], "user", agent_id, text
                                     ))
                                     # Track for reconnect context — merge consecutive user chunks
-                                    log = session_state["conversation_log"]
-                                    if log and log[-1]["speaker"] == "user":
-                                        log[-1]["text"] += " " + text
+                                    conv_log = session_state["conversation_log"]
+                                    if conv_log and conv_log[-1]["speaker"] == "user":
+                                        conv_log[-1]["text"] += " " + text
                                     else:
-                                        log.append({"speaker": "user", "text": text})
+                                        conv_log.append({"speaker": "user", "text": text})
 
                         # ── Tool / function calls ─────────────────────────
                         if response.tool_call:
@@ -322,14 +348,12 @@ async def run_agent_session(
                                 )
                                 # Always ACK the tool call back to Gemini
                                 try:
-                                    await gemini.send(
-                                        input=types.LiveClientToolResponse(
-                                            function_responses=[types.FunctionResponse(
-                                                id=fc.id,
-                                                name=fc.name,
-                                                response=result,
-                                            )]
-                                        )
+                                    await gemini.send_tool_response(
+                                        function_responses=[types.FunctionResponse(
+                                            id=fc.id,
+                                            name=fc.name,
+                                            response=result,
+                                        )]
                                     )
                                 except Exception as e:
                                     log.warning(f"Tool ACK failed: {e}")
@@ -340,15 +364,50 @@ async def run_agent_session(
                                 break
 
                 except Exception as e:
-                    log.error(f"g2b error [{agent_id}]: {type(e).__name__}: {e}", exc_info=True)
+                    log.error(f"g2b error [{agent_id}] after {response_count} responses: {type(e).__name__}: {e}", exc_info=True)
                 else:
                     # receive() exhausted normally = Gemini closed session (timeout/limit)
-                    log.info(f"Gemini session closed normally for [{agent_id}] — will reconnect")
+                    log.info(f"Gemini session closed for [{agent_id}] after {response_count} responses")
                 finally:
                     done.set()
 
-            b2g = asyncio.create_task(browser_to_gemini())
+            is_transfer = initial_summary and not initial_summary.startswith("RECONNECT")
+
+            # Start Gemini→browser relay FIRST so it's already listening when we send
+            # the greeting trigger — otherwise the response audio arrives before the
+            # task is running and gets dropped (silent transfer bug).
             g2b = asyncio.create_task(gemini_to_browser())
+
+            # Give the g2b task a tick to start its async iterator before we send.
+            await asyncio.sleep(0)
+
+            if is_transfer:
+                user_name = user.get("name", "the customer")
+                try:
+                    await gemini.send_client_content(
+                        turns=types.Content(
+                            parts=[types.Part(text=(
+                                f"{user_name} has just been transferred to you. "
+                                f"What they need: {initial_summary}. "
+                                f"Greet {user_name} warmly as {agent['name']}, introduce yourself in one sentence, "
+                                f"then immediately address their specific request. "
+                                f"Do NOT ask them to repeat themselves — you already know what they need."
+                            ))],
+                            role="user",
+                        ),
+                        turn_complete=True,
+                    )
+                except Exception as e:
+                    log.warning(f"Transfer greeting trigger failed: {e}")
+
+            # Delay browser→Gemini relay on transfers so the greeting finishes before
+            # live mic audio arrives — avoids double-response interleaving.
+            async def delayed_b2g():
+                if is_transfer:
+                    await asyncio.sleep(2.0)
+                await browser_to_gemini()
+
+            b2g = asyncio.create_task(delayed_b2g())
 
             # Wait until either task signals done (disconnect / transfer / error)
             await done.wait()
@@ -362,9 +421,12 @@ async def run_agent_session(
         await _send(ws, {"type": "error", "message": f"Voice error: {e}"})
 
     return {
-        "transfer":             session_state["transfer"],
-        "browser_disconnected": session_state["browser_disconnected"],
-        "conversation_log":     session_state["conversation_log"],
+        "transfer":              session_state["transfer"],
+        "browser_disconnected":  session_state["browser_disconnected"],
+        "conversation_log":      session_state["conversation_log"],
+        "response_count":        session_state["response_count"],
+        "last_shown_products":   session_state["last_shown_products"],
+        "last_shown_category":   session_state["last_shown_category"],
     }
 
 
@@ -411,11 +473,13 @@ async def handle_websocket(ws: WebSocket):
 
         # Agent session loop — restarts on transfer OR Gemini timeout/go_away.
         # Only exits when the browser WebSocket actually closes.
-        current_agent_id = initial_agent_id
-        transfer_summary = ""
-        reconnect_delay  = 1.0   # seconds, doubles on repeated reconnects (max 8s)
-        reconnect_count  = 0     # guard against infinite loops on persistent API errors
-        full_log = []            # accumulates conversation across all Gemini sessions
+        current_agent_id     = initial_agent_id
+        transfer_summary     = ""
+        reconnect_delay      = 1.0
+        reconnect_count      = 0
+        full_log             = []
+        last_shown_products  = []   # persists across reconnects so agent keeps SKUs
+        last_shown_category  = ""
 
         while True:
             result   = await run_agent_session(
@@ -423,7 +487,17 @@ async def handle_websocket(ws: WebSocket):
             )
             transfer         = result.get("transfer")
             browser_gone     = result.get("browser_disconnected", False)
+            session_responses = result.get("response_count", 0)
             full_log.extend(result.get("conversation_log", []))
+            if result.get("last_shown_products"):
+                last_shown_products = result["last_shown_products"]
+                last_shown_category = result.get("last_shown_category", "")
+
+            # If the session had real conversation, it hit Gemini's time limit
+            # (not a crash) — reset the failure counter so we don't give up
+            if session_responses > 20:
+                reconnect_count = 0
+                reconnect_delay = 1.0
 
             # ── Browser closed the tab / connection ──────────────────────────
             if browser_gone:
@@ -476,20 +550,24 @@ async def handle_websocket(ws: WebSocket):
             reconnect_delay = min(reconnect_delay * 2, 8.0)
 
             # Build reconnect context — keep it short to avoid oversized prompts
+            parts = ["RECONNECT — voice session refreshed. DO NOT greet again. Continue naturally."]
+
             if full_log:
-                # Last 8 turns max, truncate each to 120 chars
                 recent = full_log[-8:]
-                lines = [
-                    f"{'Customer' if e['speaker'] == 'user' else 'Agent'}: {e['text'][:120]}"
-                    for e in recent
-                ]
-                transfer_summary = (
-                    "RECONNECT — voice session refreshed. "
-                    "DO NOT greet again. Continue the conversation naturally.\n"
-                    "Recent context:\n" + "\n".join(lines)
+                lines  = [f"{'Customer' if e['speaker']=='user' else 'Agent'}: {e['text'][:120]}"
+                          for e in recent]
+                parts.append("Recent conversation:\n" + "\n".join(lines))
+
+            if last_shown_products:
+                sku_lines = [f"  - {p['name']} | SKU: {p['sku']} | ${p['price']}"
+                             for p in last_shown_products[:10]]
+                parts.append(
+                    f"IMPORTANT — Last shown products ({last_shown_category}), "
+                    f"use these SKUs directly for add_to_cart/highlight/show_detail:\n" +
+                    "\n".join(sku_lines)
                 )
-            else:
-                transfer_summary = "RECONNECT — session refreshed. Continue naturally without re-introducing yourself."
+
+            transfer_summary = "\n\n".join(parts)
 
     except WebSocketDisconnect:
         pass

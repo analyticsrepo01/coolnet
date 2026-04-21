@@ -106,23 +106,42 @@ CURRENT CUSTOMER:
 - Recent orders: {orders}
 - Session context: {prior if prior else 'New conversation'}
 
-CATALOG TOOL RULES (CRITICAL — always follow):
-1. Before discussing any product category → call show_catalog_category()
-2. When you mention a specific product by name or SKU → call highlight_product()
-3. When comparing 2–3 specific products → call show_product_comparison()
-4. When giving a full product recommendation → call show_product_detail()
-5. Keep catalog in sync with what you're talking about — it's the customer's visual guide
+CATALOG TOOL RULES (CRITICAL — always follow in this exact order):
+1. Before discussing any product category → call show_catalog_category() first
+   → The response contains a "products" list with each product's SKU, name, and price
+   → SAVE these SKUs — you MUST use them in all subsequent highlight/detail/comparison calls
+2. To highlight a specific product you're talking about → call highlight_product(sku) using the SKU from step 1
+3. To show full details of a product → call show_product_detail(sku) using the SKU from step 1
+4. To compare 2–3 products side by side → call show_product_comparison(skus=[...]) using SKUs from step 1
+5. If the customer says "that one", "the first one", "the cheaper one" etc. → figure out which product from the list you showed, get its SKU, and call the appropriate tool
+
+EXAMPLE FLOW (refrigerators):
+- show_catalog_category("refrigerators") → response has products: [{{"sku":"CN-CFD-3006","name":"FrostMaster..."}}, ...]
+- Customer says "tell me about the Door-in-Door one"
+- Call highlight_product("CN-CFD-3006") then show_product_detail("CN-CFD-3006")
+- Describe its features: InstaView panel, CraftIce round ice, 655L capacity, 5-star energy, $3,199
+
+NEVER invent or guess SKUs — always use SKUs returned by show_catalog_category.
 
 CONVERSATION STYLE:
 - Warm, professional, never pushy
 - Use the customer's name naturally
 - Mention their loyalty tier when it's relevant (e.g., "As a Platinum member you get priority service")
 - Quote prices clearly including any on-sale price vs original
-- Always mention warranties — CoolNest warranties are a key selling point
+- Always mention key specs: capacity/size, energy rating, warranty, and standout features
+- When describing a product verbally, cover: what makes it special, who it's best for, price with savings
+
+SHOPPING CART RULES:
+- When customer says "add to cart", "I'll take it", "I want this", "buy this" → call add_to_cart(sku) immediately
+- Always confirm verbally: "Great, I've added [product name] to your cart!"
+- When customer asks "what's in my cart" or "show cart" → call show_cart()
+- When customer says "checkout", "ready to pay", "place order" → call proceed_to_checkout()
+- Only add products with SKUs you received from show_catalog_category
 
 TRANSFER RULES:
 - When a customer needs help outside your specialty → use transfer_to_agent()
-- Always give a brief summary in the transfer so the next agent is briefed
+- The "summary" field MUST include: what the customer asked for, their name, loyalty tier, and any products already discussed or added to cart
+- Example summary: "Veena (Platinum) wants to buy a portable AC. She asked about the CoolBreeze 12000BTU. Cart is empty."
 - Never leave the customer without an agent — always transfer, never say "I can't help"
 """
 
@@ -202,23 +221,23 @@ CATALOG_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="highlight_product",
-        description="Highlight a specific product in the catalog panel with a glowing border. Call this when you mention a specific product.",
+        description="Highlight a specific product in the catalog panel with a glowing border. Call this when you mention a specific product. Use the SKU returned by show_catalog_category.",
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
-                "sku": types.Schema(type=types.Type.STRING, description="Product SKU e.g. CN-FR500"),
-                "reason": types.Schema(type=types.Type.STRING, description="Brief reason to show customer e.g. 'Our best-seller'"),
+                "sku": types.Schema(type=types.Type.STRING, description="Product SKU from the show_catalog_category response, e.g. CN-CFD-3006, CN-CEL-2810, CN-CFW-3400"),
+                "reason": types.Schema(type=types.Type.STRING, description="Brief reason to show customer e.g. 'Best seller for families'"),
             },
             required=["sku"],
         ),
     ),
     types.FunctionDeclaration(
         name="show_product_detail",
-        description="Show full product detail view in catalog panel. Call this when giving a product recommendation.",
+        description="Show full product detail view with image, specs, and highlights. Call this when the customer wants to know more about a specific product. Use the SKU returned by show_catalog_category.",
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
-                "sku": types.Schema(type=types.Type.STRING, description="Product SKU"),
+                "sku": types.Schema(type=types.Type.STRING, description="Product SKU from the show_catalog_category response, e.g. CN-CFD-3006, CN-CEL-2810, CN-CFW-3400"),
             },
             required=["sku"],
         ),
@@ -318,9 +337,35 @@ DISCOUNT_TOOLS = [
 ]
 
 
+CART_TOOLS = [
+    types.FunctionDeclaration(
+        name="add_to_cart",
+        description="Add a product to the customer's shopping cart. Call this when the customer says they want to buy, add to cart, or purchase a product.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "sku":      types.Schema(type=types.Type.STRING, description="Product SKU from show_catalog_category response"),
+                "quantity": types.Schema(type=types.Type.INTEGER, description="Quantity to add, default 1"),
+            },
+            required=["sku"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="show_cart",
+        description="Show the customer's shopping cart. Call this when the customer asks what's in their cart or wants to review items.",
+        parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="proceed_to_checkout",
+        description="Navigate the customer to the checkout page. Call this when the customer is ready to pay or says 'checkout'.",
+        parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+    ),
+]
+
+
 def get_tools_for_agent(agent: dict) -> list[types.Tool]:
     """Return the tool set appropriate for the agent's role."""
-    declarations = CATALOG_TOOLS + PRODUCT_TOOLS + AGENT_TOOLS
+    declarations = CATALOG_TOOLS + PRODUCT_TOOLS + AGENT_TOOLS + CART_TOOLS
     if agent["role"] in ("supervisor", "manager"):
         declarations += DISCOUNT_TOOLS
     return [types.Tool(function_declarations=declarations)]

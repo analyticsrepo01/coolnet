@@ -1,7 +1,7 @@
 """CoolNest product catalog"""
 
 CATEGORIES = {
-    "refrigerators":    {"name": "Refrigerators",      "icon": "🧊", "specialist": "frosty",  "subcategories": ["French Door", "Side-by-Side", "4-Door", "Counter-Depth"]},
+    "refrigerators":    {"name": "Refrigerators",      "icon": "🧊", "specialist": "frosty",  "subcategories": ["French Door", "Side-by-Side", "Bespoke", "Counter-Depth"]},
     "tvs":              {"name": "Televisions",         "icon": "📺", "specialist": "pixel",   "subcategories": ["OLED", "QLED", "Full HD"]},
     "washing_machines": {"name": "Washing Machines",    "icon": "🌀", "specialist": "frosty",  "subcategories": ["Front Load", "Top Load"]},
     "dryers":           {"name": "Dryers",              "icon": "♨️", "specialist": "breeze",  "subcategories": ["Heat Pump", "Condenser"]},
@@ -44,7 +44,7 @@ PRODUCTS = {
         "sku": "CN-CBE-2900", "image": "products/CN-CBE-2900.jpg", "pdf_url": "pdfs/CN-CBE-2900.pdf",
         "name": "CoolNest Bespoke 648L 4-Door with Beverage Center",
         "brand": "CoolNest Bespoke Series",
-        "category": "refrigerators", "subcategory": "4-Door",
+        "category": "refrigerators", "subcategory": "Bespoke",
         "price": 4199, "price_original": 4799, "discount_pct": 12,
         "rating": 4.8, "review_count": 156, "in_stock": True, "specialist_id": "frosty",
         "description": "Our most intelligent fridge. 648L 4-door with a 32\" AI Family Hub touch screen that manages food inventory, recipes, and grocery lists. Beverage Center with Autofill Pitcher. Mix-and-match custom panel colors.",
