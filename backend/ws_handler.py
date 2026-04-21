@@ -112,22 +112,66 @@ async def execute_tool(name: str, args: dict, ws: WebSocket, session_state: dict
         )
         return {"results": results[:6], "count": len(results)}
 
-    # ── Cart ──────────────────────────────────────────────────────────────
+    # ── Cart (server-side cart is source of truth for agent) ─────────────
+    def _cart_summary(cart: dict) -> list:
+        return [
+            f"{v['quantity']}x {v['product']['name']} "
+            f"@ ${v['discounted_price'] or v['product']['price']:.2f} each"
+            for v in cart.values()
+        ]
+
+    def _sync_cart_to_browser(cart: dict):
+        """Return a list of catalog_action messages to bring browser in sync."""
+        return [
+            {"type": "catalog_action", "action": "set_cart_item",
+             "product": v["product"], "quantity": v["quantity"],
+             "discounted_price": v["discounted_price"],
+             "original_price": v["original_price"]}
+            for v in cart.values()
+        ]
+
     if name == "add_to_cart":
         sku      = args.get("sku", "")
-        quantity = int(args.get("quantity", 1))
+        quantity = max(1, int(args.get("quantity", 1)))
         product  = PRODUCTS.get(sku)
         if not product:
-            return {"status": "error", "message": f"Product {sku} not found. Call show_catalog_category first to get valid SKUs."}
-        await _send(ws, {"type": "catalog_action", "action": "add_to_cart",
-                         "product": product, "quantity": quantity})
-        return {"status": "ok", "added": product["name"], "quantity": quantity,
-                "unit_price": product["price"],
-                "line_total": round(product["price"] * quantity, 2)}
+            return {"status": "error", "message": f"SKU {sku} not found. Call show_catalog_category first."}
+        cart = session_state["cart"]
+        if sku in cart:
+            cart[sku]["quantity"] += quantity
+            msg = f"Updated quantity to {cart[sku]['quantity']}"
+        else:
+            cart[sku] = {"product": product, "quantity": quantity,
+                         "discounted_price": None, "original_price": product["price"]}
+            msg = f"Added to cart"
+        item = cart[sku]
+        effective_price = item["discounted_price"] or product["price"]
+        await _send(ws, {"type": "catalog_action", "action": "set_cart_item",
+                         "product": product, "quantity": item["quantity"],
+                         "discounted_price": item["discounted_price"],
+                         "original_price": item["original_price"]})
+        return {"status": "ok", "message": msg, "product": product["name"],
+                "quantity": item["quantity"], "unit_price": effective_price,
+                "line_total": round(effective_price * item["quantity"], 2),
+                "cart": _cart_summary(cart)}
+
+    if name == "remove_from_cart":
+        sku  = args.get("sku", "")
+        cart = session_state["cart"]
+        name_ = cart.pop(sku, {}).get("product", {}).get("name", sku)
+        await _send(ws, {"type": "catalog_action", "action": "remove_from_cart", "sku": sku})
+        return {"status": "ok", "removed": name_, "cart": _cart_summary(cart)}
 
     if name == "show_cart":
+        cart = session_state["cart"]
         await _send(ws, {"type": "catalog_action", "action": "show_cart"})
-        return {"status": "ok"}
+        if not cart:
+            return {"status": "ok", "message": "Cart is empty"}
+        total = sum((v["discounted_price"] or v["product"]["price"]) * v["quantity"]
+                    for v in cart.values())
+        return {"status": "ok", "cart": _cart_summary(cart),
+                "subtotal": round(total, 2), "gst": round(total * 0.09, 2),
+                "total": round(total * 1.09, 2)}
 
     if name == "proceed_to_checkout":
         await _send(ws, {"type": "catalog_action", "action": "show_checkout"})
@@ -144,18 +188,31 @@ async def execute_tool(name: str, args: dict, ws: WebSocket, session_state: dict
 
     # ── Supervisor / manager only ──────────────────────────────────────────
     if name == "apply_discount":
-        sku       = args.get("sku", "")
-        pct       = args.get("discount_pct", 0)
-        product   = PRODUCTS.get(sku, {})
-        original  = product.get("price", 0)
+        sku        = args.get("sku", "")
+        pct        = args.get("discount_pct", 0)
+        product    = PRODUCTS.get(sku, {})
+        original   = product.get("price", 0)
         discounted = round(original * (1 - pct / 100), 2)
+        # Update server-side cart
+        cart = session_state["cart"]
+        if sku in cart:
+            cart[sku]["discounted_price"] = discounted
+            cart[sku]["original_price"]   = original
+        # Promo banner
         await _send(ws, {
             "type": "catalog_action", "action": "show_promotion",
             "title": f"{int(pct)}% Loyalty Discount Applied!",
             "description": f"{product.get('name', sku)}: ${discounted:.2f} (was ${original:.2f})",
             "discount_pct": pct, "sku": sku,
         })
-        return {"status": "ok", "discounted_price": discounted, "sku": sku, "discount_pct": pct}
+        # Update browser cart price
+        await _send(ws, {
+            "type": "catalog_action", "action": "apply_cart_discount",
+            "sku": sku, "discounted_price": discounted,
+            "original_price": original, "discount_pct": pct,
+        })
+        return {"status": "ok", "discounted_price": discounted, "sku": sku, "discount_pct": pct,
+                "cart": _cart_summary(cart)}
 
     if name == "initiate_return":
         order_id = args.get("order_id", "")
@@ -220,7 +277,12 @@ async def run_agent_session(
         output_audio_transcription=types.AudioTranscriptionConfig(),
     )
 
-    session_state = {"transfer": None, "browser_disconnected": False, "conversation_log": [], "response_count": 0, "last_shown_products": [], "last_shown_category": ""}
+    session_state = {
+        "transfer": None, "browser_disconnected": False,
+        "conversation_log": [], "response_count": 0,
+        "last_shown_products": [], "last_shown_category": "",
+        "cart": context.get("_cart", {}),   # persisted across agent transfers
+    }
     # done is set by whichever task exits first → signals the other to stop
     done = asyncio.Event()
 
@@ -373,37 +435,32 @@ async def run_agent_session(
 
             is_transfer = initial_summary and not initial_summary.startswith("RECONNECT")
 
-            # Start Gemini→browser relay FIRST so it's already listening when we send
-            # the greeting trigger — otherwise the response audio arrives before the
-            # task is running and gets dropped (silent transfer bug).
+            # Start Gemini→browser relay first — it must be actively iterating before
+            # the greeting trigger is sent, otherwise the audio response is dropped.
             g2b = asyncio.create_task(gemini_to_browser())
 
-            # Give the g2b task a tick to start its async iterator before we send.
-            await asyncio.sleep(0)
-
-            if is_transfer:
-                user_name = user.get("name", "the customer")
-                try:
-                    await gemini.send_client_content(
-                        turns=types.Content(
-                            parts=[types.Part(text=(
+            async def delayed_b2g():
+                if is_transfer:
+                    # Wait for g2b's receive loop to fully initialise.
+                    await asyncio.sleep(0.5)
+                    user_name = user.get("name", "the customer")
+                    # IMPORTANT: must use send_realtime_input(text=...) — never
+                    # send_client_content in a session that uses send_realtime_input(audio=...).
+                    # Mixing them triggers a 1008 policy violation that kills the session.
+                    try:
+                        await gemini.send_realtime_input(
+                            text=(
                                 f"{user_name} has just been transferred to you. "
                                 f"What they need: {initial_summary}. "
                                 f"Greet {user_name} warmly as {agent['name']}, introduce yourself in one sentence, "
                                 f"then immediately address their specific request. "
                                 f"Do NOT ask them to repeat themselves — you already know what they need."
-                            ))],
-                            role="user",
-                        ),
-                        turn_complete=True,
-                    )
-                except Exception as e:
-                    log.warning(f"Transfer greeting trigger failed: {e}")
-
-            # Delay browser→Gemini relay on transfers so the greeting finishes before
-            # live mic audio arrives — avoids double-response interleaving.
-            async def delayed_b2g():
-                if is_transfer:
+                            )
+                        )
+                        log.info(f"Transfer greeting sent for [{agent_id}]")
+                    except Exception as e:
+                        log.warning(f"Transfer greeting trigger failed: {e}")
+                    # Let the greeting audio play out before mic audio can interrupt.
                     await asyncio.sleep(2.0)
                 await browser_to_gemini()
 
@@ -427,6 +484,7 @@ async def run_agent_session(
         "response_count":        session_state["response_count"],
         "last_shown_products":   session_state["last_shown_products"],
         "last_shown_category":   session_state["last_shown_category"],
+        "cart":                  session_state["cart"],
     }
 
 
@@ -478,12 +536,15 @@ async def handle_websocket(ws: WebSocket):
         reconnect_delay      = 1.0
         reconnect_count      = 0
         full_log             = []
-        last_shown_products  = []   # persists across reconnects so agent keeps SKUs
+        last_shown_products  = []
         last_shown_category  = ""
+        shared_cart          = {}   # persists across all agent sessions
 
         while True:
+            # Inject the shared cart so the new session starts with agent's cart state
+            session_context = {**context, "_cart": shared_cart}
             result   = await run_agent_session(
-                ws, user, current_agent_id, session_id, context, transfer_summary
+                ws, user, current_agent_id, session_id, session_context, transfer_summary
             )
             transfer         = result.get("transfer")
             browser_gone     = result.get("browser_disconnected", False)
@@ -492,6 +553,8 @@ async def handle_websocket(ws: WebSocket):
             if result.get("last_shown_products"):
                 last_shown_products = result["last_shown_products"]
                 last_shown_category = result.get("last_shown_category", "")
+            if result.get("cart") is not None:
+                shared_cart = result["cart"]
 
             # If the session had real conversation, it hit Gemini's time limit
             # (not a crash) — reset the failure counter so we don't give up
@@ -565,6 +628,21 @@ async def handle_websocket(ws: WebSocket):
                     f"IMPORTANT — Last shown products ({last_shown_category}), "
                     f"use these SKUs directly for add_to_cart/highlight/show_detail:\n" +
                     "\n".join(sku_lines)
+                )
+
+            if shared_cart:
+                cart_lines = [
+                    f"  - {v['quantity']}x {v['product']['name']} "
+                    f"@ ${v['discounted_price'] or v['product']['price']:.2f}"
+                    + (" [discounted]" if v["discounted_price"] else "")
+                    for v in shared_cart.values()
+                ]
+                total = sum((v["discounted_price"] or v["product"]["price"]) * v["quantity"]
+                            for v in shared_cart.values())
+                parts.append(
+                    "CURRENT CART — do NOT re-add these items unless customer asks:\n" +
+                    "\n".join(cart_lines) +
+                    f"\nSubtotal: ${total:.2f} + 9% GST = ${total*1.09:.2f}"
                 )
 
             transfer_summary = "\n\n".join(parts)

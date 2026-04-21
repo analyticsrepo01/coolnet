@@ -92,6 +92,54 @@ export class AudioPlayer {
 }
 
 
+// ── UI tones (Web Audio API synthesis — no files needed) ─────────────────────
+//
+// connect:    two ascending notes  → "you're in"
+// transfer:   quick rising chime   → "handing over"
+// disconnect: descending fade      → "session closed"
+
+export function playTone(type = 'connect') {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)()
+    const master = ctx.createGain()
+    master.connect(ctx.destination)
+    const now = ctx.currentTime
+
+    const note = (freq, startAt, dur, vol = 0.25, shape = 'sine') => {
+      const osc = ctx.createOscillator()
+      const env = ctx.createGain()
+      osc.type = shape
+      osc.frequency.setValueAtTime(freq, startAt)
+      env.gain.setValueAtTime(0, startAt)
+      env.gain.linearRampToValueAtTime(vol, startAt + 0.02)
+      env.gain.exponentialRampToValueAtTime(0.001, startAt + dur)
+      osc.connect(env)
+      env.connect(master)
+      osc.start(startAt)
+      osc.stop(startAt + dur)
+      return osc
+    }
+
+    if (type === 'connect') {
+      // C5 → E5 ascending chime
+      note(523, now,       0.5)
+      note(659, now + 0.18, 0.7)
+    } else if (type === 'transfer') {
+      // Quick rising two-tone ding
+      note(880, now,       0.4, 0.2, 'triangle')
+      note(1108, now + 0.15, 0.55, 0.2, 'triangle')
+    } else if (type === 'disconnect') {
+      // E5 → C5 descending close
+      note(659, now,       0.45)
+      note(523, now + 0.2,  0.7, 0.2)
+    }
+
+    // Close the throw-away context after tones finish
+    setTimeout(() => ctx.close(), 1200)
+  } catch (_) { /* audio not available */ }
+}
+
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function floatToPCM16(float32) {

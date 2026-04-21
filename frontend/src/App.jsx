@@ -3,7 +3,7 @@ import LoginScreen from './components/LoginScreen.jsx'
 import AgentPanel from './components/AgentPanel.jsx'
 import CatalogPanel from './components/CatalogPanel.jsx'
 import { CoolNestSession } from './utils/coolnest-ws.js'
-import { AudioStreamer, AudioPlayer } from './utils/media-utils.js'
+import { AudioStreamer, AudioPlayer, playTone } from './utils/media-utils.js'
 
 export default function App() {
   const [user, setUser]                   = useState(null)
@@ -113,12 +113,14 @@ export default function App() {
         setConnected(true)
         setConnecting(false)
         setReconnecting(false)
+        playTone('connect')
         addTranscript('system', null, `Hi ${loggedInUser.name}! Connected to ${msg.agent.name} — listening...`)
         // Auto-start mic — startMic() is idempotent (no-op if already running)
         await startMic()
       },
 
       onAgentChanged: (msg) => {
+        playTone('transfer')
         switchAgent(msg.agent)
       },
 
@@ -159,6 +161,7 @@ export default function App() {
         setConnected(false)
         setReconnecting(false)
         stopMic()
+        playTone('disconnect')
         addTranscript('system', null, 'Session ended.')
       },
     })
@@ -203,6 +206,32 @@ export default function App() {
   }, [])
 
   const handleClearCart = useCallback(() => setCart([]), [])
+
+  const handleApplyDiscount = useCallback((sku, discountedPrice, originalPrice) => {
+    setCart(prev => prev.map(i =>
+      i.product.sku === sku
+        ? { ...i, product: { ...i.product, price: discountedPrice }, discountedFrom: originalPrice ?? i.product.price }
+        : i
+    ))
+  }, [])
+
+  // Agent sets exact quantity (idempotent) — prevents duplicates
+  const handleSetCartItem = useCallback((product, quantity, discountedPrice, originalPrice) => {
+    setCart(prev => {
+      if (quantity <= 0) return prev.filter(i => i.product.sku !== product.sku)
+      const exists = prev.find(i => i.product.sku === product.sku)
+      const updatedProduct = discountedPrice
+        ? { ...product, price: discountedPrice }
+        : product
+      const discountedFrom = discountedPrice ? (originalPrice ?? product.price) : undefined
+      if (exists) {
+        return prev.map(i => i.product.sku === product.sku
+          ? { ...i, product: updatedProduct, quantity, ...(discountedFrom ? { discountedFrom } : {}) }
+          : i)
+      }
+      return [...prev, { product: updatedProduct, quantity, ...(discountedFrom ? { discountedFrom } : {}) }]
+    })
+  }, [])
 
   // ── Product selected by user in catalog ──────────────────────────────────
   const handleProductSelect = useCallback((product) => {
@@ -251,13 +280,16 @@ export default function App() {
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-3 text-white shadow-sm flex-shrink-0"
               style={{ background: '#0D5C6E' }}>
-        <div className="flex items-center gap-3">
+        <button
+          className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+          onClick={() => setCatalogState({ action: 'show_home', _ts: Date.now() })}
+        >
           <span className="text-2xl">🏠</span>
-          <div>
+          <div className="text-left">
             <span className="font-bold text-lg tracking-tight">CoolNest</span>
             <span className="ml-2 text-xs opacity-70">Smart Appliances, Smarter Prices</span>
           </div>
-        </div>
+        </button>
         <div className="flex items-center gap-3">
           {connecting && <span className="text-xs opacity-80 animate-pulse">Connecting...</span>}
           {reconnecting && (
@@ -308,6 +340,8 @@ export default function App() {
             onUpdateCartQty={handleUpdateCartQty}
             onRemoveFromCart={handleRemoveFromCart}
             onClearCart={handleClearCart}
+            onApplyDiscount={handleApplyDiscount}
+            onSetCartItem={handleSetCartItem}
           />
         </div>
       </div>

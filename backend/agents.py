@@ -30,7 +30,7 @@ AGENTS = {
         "id": "breeze", "name": "Breeze", "role": "specialist",
         "title": "Climate & Laundry Care Specialist",
         "specialty_text": "Air Conditioners · Fans · Dryers",
-        "voice": "Puck",
+        "voice": "Zephyr",
         "avatar": "avatars/breeze.png",
         "color": "#44BBA4",
         "categories": ["air_conditioners", "fans", "dryers"],
@@ -132,11 +132,15 @@ CONVERSATION STYLE:
 - When describing a product verbally, cover: what makes it special, who it's best for, price with savings
 
 SHOPPING CART RULES:
-- When customer says "add to cart", "I'll take it", "I want this", "buy this" → call add_to_cart(sku) immediately
-- Always confirm verbally: "Great, I've added [product name] to your cart!"
-- When customer asks "what's in my cart" or "show cart" → call show_cart()
+- When customer says "add to cart", "I'll take it", "I want this", "buy this" → call add_to_cart(sku) ONCE
+- The add_to_cart response tells you the current cart contents — trust that, do NOT add again
+- NEVER call add_to_cart more than once per customer request for the same item
+- Always confirm verbally what's now in the cart using the cart summary from the tool response
+- When customer asks "what's in my cart" → call show_cart() to get the real cart, then read it back accurately
+- When customer says "remove", "take out", "delete" an item → call remove_from_cart(sku)
 - When customer says "checkout", "ready to pay", "place order" → call proceed_to_checkout()
-- Only add products with SKUs you received from show_catalog_category
+- Only use SKUs from show_catalog_category responses
+- The session context shows CURRENT CART — never re-add those items unless customer explicitly asks
 
 TRANSFER RULES:
 - When a customer needs help outside your specialty → use transfer_to_agent()
@@ -340,7 +344,10 @@ DISCOUNT_TOOLS = [
 CART_TOOLS = [
     types.FunctionDeclaration(
         name="add_to_cart",
-        description="Add a product to the customer's shopping cart. Call this when the customer says they want to buy, add to cart, or purchase a product.",
+        description=(
+            "Add a product to the customer's shopping cart. Call ONCE per item per customer request. "
+            "The response includes the full current cart — do NOT call again if the item is already there."
+        ),
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
@@ -351,8 +358,19 @@ CART_TOOLS = [
         ),
     ),
     types.FunctionDeclaration(
+        name="remove_from_cart",
+        description="Remove a product from the customer's cart. Use when customer asks to remove an item.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "sku": types.Schema(type=types.Type.STRING, description="Product SKU to remove"),
+            },
+            required=["sku"],
+        ),
+    ),
+    types.FunctionDeclaration(
         name="show_cart",
-        description="Show the customer's shopping cart. Call this when the customer asks what's in their cart or wants to review items.",
+        description="Show the customer's cart. Returns exact cart contents with prices and totals. Use this to get the accurate cart state before quoting prices.",
         parameters=types.Schema(type=types.Type.OBJECT, properties={}),
     ),
     types.FunctionDeclaration(

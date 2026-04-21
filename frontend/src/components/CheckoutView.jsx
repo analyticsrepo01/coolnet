@@ -89,11 +89,18 @@ export default function CheckoutView({ cart, user, onBackToCart, onOrderPlaced, 
       </p>
 
       <div className="w-full bg-green-50 border border-green-100 rounded-2xl p-4 mb-4 text-left space-y-1.5">
-        {cart.map(({ product, quantity }) => (
-          <div key={product.sku} className="flex justify-between text-xs text-gray-700">
-            <span className="truncate flex-1 mr-2">{product.name.split(' ').slice(0,4).join(' ')} ×{quantity}</span>
-            <span className="font-medium flex-shrink-0">
-              S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+        {cart.map(({ product, quantity, discountedFrom }) => (
+          <div key={product.sku} className="flex justify-between text-xs text-gray-700 gap-2">
+            <span className="truncate flex-1">{product.name.split(' ').slice(0,4).join(' ')} ×{quantity}</span>
+            <span className="flex-shrink-0 text-right">
+              {discountedFrom && (
+                <span className="line-through text-gray-400 mr-1">
+                  S${(discountedFrom * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                </span>
+              )}
+              <span className="font-medium">
+                S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+              </span>
             </span>
           </div>
         ))}
@@ -195,13 +202,20 @@ export default function CheckoutView({ cart, user, onBackToCart, onOrderPlaced, 
             <span>📋</span> Order Summary
           </h3>
           <div className="bg-gray-50 rounded-2xl p-3 space-y-1.5">
-            {cart.map(({ product, quantity }) => (
-              <div key={product.sku} className="flex justify-between text-xs">
-                <span className="text-gray-600 truncate flex-1 mr-2">
+            {cart.map(({ product, quantity, discountedFrom }) => (
+              <div key={product.sku} className="flex justify-between text-xs gap-2">
+                <span className="text-gray-600 truncate flex-1">
                   {product.name.split(' ').slice(0,4).join(' ')} ×{quantity}
                 </span>
-                <span className="text-gray-800 font-medium flex-shrink-0">
-                  S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                <span className="flex-shrink-0 text-right">
+                  {discountedFrom && (
+                    <span className="line-through text-gray-400 mr-1">
+                      S${(discountedFrom * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                    </span>
+                  )}
+                  <span className="text-gray-800 font-medium">
+                    S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                  </span>
                 </span>
               </div>
             ))}

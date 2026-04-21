@@ -22,7 +22,7 @@ const PAGE_SIZE = 4
 
 export default function CatalogPanel({
   catalogState, agentColor, onProductSelect,
-  cart, onAddToCart, onUpdateCartQty, onRemoveFromCart, onClearCart, user,
+  cart, onAddToCart, onUpdateCartQty, onRemoveFromCart, onClearCart, onApplyDiscount, onSetCartItem, user,
 }) {
   const [view, setView]           = useState({ type: 'home' })
   const [animating, setAnimating] = useState(false)
@@ -64,6 +64,14 @@ export default function CatalogPanel({
       setTimeout(() => setPromotion(null), 8000)
     } else if (action === 'add_to_cart') {
       if (catalogState.product) onAddToCart?.(catalogState.product, catalogState.quantity || 1)
+    } else if (action === 'set_cart_item') {
+      if (catalogState.product)
+        onSetCartItem?.(catalogState.product, catalogState.quantity,
+                        catalogState.discounted_price, catalogState.original_price)
+    } else if (action === 'remove_from_cart') {
+      if (catalogState.sku) onRemoveFromCart?.(catalogState.sku)
+    } else if (action === 'apply_cart_discount') {
+      onApplyDiscount?.(catalogState.sku, catalogState.discounted_price, catalogState.original_price)
     } else if (action === 'show_cart') {
       transition(() => setView({ type: 'cart' }))
     } else if (action === 'show_checkout') {
@@ -269,6 +277,7 @@ export default function CatalogPanel({
             onUpdateQty={onUpdateCartQty}
             onRemove={onRemoveFromCart}
             onCheckout={() => setView({ type: 'checkout' })}
+            onApplyDiscount={onApplyDiscount}
           />
         )}
         {view.type === 'checkout' && (

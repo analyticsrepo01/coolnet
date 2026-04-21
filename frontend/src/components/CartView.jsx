@@ -1,4 +1,4 @@
-export default function CartView({ cart, onBack, onUpdateQty, onRemove, onCheckout, agentColor }) {
+export default function CartView({ cart, onBack, onUpdateQty, onRemove, onCheckout, agentColor, onApplyDiscount }) {
   const color = agentColor || '#0D5C6E'
   const subtotal = cart.reduce((s, item) => s + item.product.price * item.quantity, 0)
   const gst      = subtotal * 0.09
@@ -28,7 +28,7 @@ export default function CartView({ cart, onBack, onUpdateQty, onRemove, onChecko
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 min-h-0">
-        {cart.map(({ product, quantity }) => (
+        {cart.map(({ product, quantity, discountedFrom }) => (
           <div key={product.sku} className="bg-white rounded-2xl p-3 shadow-sm border border-gray-100 flex gap-3">
             <div className="w-16 h-16 flex-shrink-0 rounded-xl overflow-hidden bg-gray-50 flex items-center justify-center">
               {product.image
@@ -40,10 +40,22 @@ export default function CartView({ cart, onBack, onUpdateQty, onRemove, onChecko
               <p className="text-xs font-semibold text-gray-800 leading-tight line-clamp-2">{product.name}</p>
               <p className="text-xs text-gray-400 mt-0.5">{product.brand}</p>
               <div className="flex items-center justify-between mt-2">
-                <span className="text-sm font-bold" style={{ color }}>
-                  S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
-                </span>
-                <div className="flex items-center gap-1.5">
+                <div>
+                  <span className="text-sm font-bold" style={{ color }}>
+                    S${(product.price * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                  </span>
+                  {discountedFrom && (
+                    <span className="text-xs text-gray-400 line-through ml-1.5">
+                      S${(discountedFrom * quantity).toLocaleString('en-SG', { minimumFractionDigits: 2 })}
+                    </span>
+                  )}
+                  {discountedFrom && (
+                    <span className="ml-1.5 text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded-full">
+                      Loyalty discount
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 ml-2">
                   <button
                     onClick={() => onUpdateQty(product.sku, -1)}
                     className="w-6 h-6 rounded-full border border-gray-200 text-sm flex items-center justify-center hover:bg-gray-50 transition"
